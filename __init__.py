@@ -16,8 +16,8 @@ def get_remote_models(server_url):
             if response.status_code == 200:
                 _models_cache["models"] = response.json().get("models", [])
                 _models_cache["server"] = server_url
-        except:
-            pass
+        except requests.exceptions.RequestException:
+            pass  # Server unavailable, will return fallback
     return _models_cache["models"] if _models_cache["models"] else ["(server unavailable)"]
 
 

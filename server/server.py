@@ -3,7 +3,9 @@ import os
 import json
 import torch
 import uuid
-from fastapi import FastAPI, UploadFile, File, Form
+import time
+import threading
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import Response, StreamingResponse
 from PIL import Image
 import numpy as np
@@ -12,13 +14,54 @@ from spandrel import ModelLoader
 app = FastAPI(title="Remote Upscale Server", version="1.0.0")
 
 MODELS_PATH = os.environ.get("UPSCALE_MODELS_PATH", "./models")
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+RESULT_TTL = 300  # 5 minutes
 
 loaded_models = {}
-results_cache = {}
+results_cache = {}  # {result_id: {"data": bytes, "created": timestamp}}
+
+
+def cleanup_old_results():
+    """Remove results older than RESULT_TTL."""
+    now = time.time()
+    expired = [k for k, v in results_cache.items() if now - v["created"] > RESULT_TTL]
+    for k in expired:
+        del results_cache[k]
+
+
+def start_cleanup_thread():
+    """Background thread to clean up old results every 60 seconds."""
+    def cleanup_loop():
+        while True:
+            time.sleep(60)
+            cleanup_old_results()
+    thread = threading.Thread(target=cleanup_loop, daemon=True)
+    thread.start()
+
+
+start_cleanup_thread()
+
+
+def validate_model_name(model_name: str) -> str:
+    """Validate model name to prevent path traversal attacks."""
+    # Check for path traversal attempts
+    if ".." in model_name or "/" in model_name or "\\" in model_name:
+        raise HTTPException(status_code=400, detail="Invalid model name")
+
+    model_path = os.path.join(MODELS_PATH, model_name)
+
+    # Verify the path is within MODELS_PATH
+    if not os.path.realpath(model_path).startswith(os.path.realpath(MODELS_PATH)):
+        raise HTTPException(status_code=400, detail="Invalid model name")
+
+    if not os.path.exists(model_path):
+        raise HTTPException(status_code=404, detail=f"Model not found: {model_name}")
+
+    return model_path
 
 
 def get_model(model_name: str):
-    model_path = os.path.join(MODELS_PATH, model_name)
+    model_path = validate_model_name(model_name)
     if model_name not in loaded_models:
         print(f"Loading model: {model_path}")
         model = ModelLoader().load_from_file(model_path).eval().cuda()
@@ -45,6 +88,8 @@ async def upscale(
 ):
     """Upscale an image without progress streaming."""
     image_data = await file.read()
+    if len(image_data) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail=f"File too large. Max size: {MAX_FILE_SIZE // 1024 // 1024}MB")
     image = Image.open(io.BytesIO(image_data)).convert("RGB")
 
     img_np = np.array(image).astype(np.float32) / 255.0
@@ -78,6 +123,8 @@ async def upscale_stream(
 ):
     """Upscale an image with SSE progress streaming."""
     image_data = await file.read()
+    if len(image_data) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail=f"File too large. Max size: {MAX_FILE_SIZE // 1024 // 1024}MB")
     image = Image.open(io.BytesIO(image_data)).convert("RGB")
 
     img_np = np.array(image).astype(np.float32) / 255.0
@@ -132,7 +179,7 @@ async def upscale_stream(
 
         img_bytes = io.BytesIO()
         output_image.save(img_bytes, format="PNG")
-        results_cache[result_id] = img_bytes.getvalue()
+        results_cache[result_id] = {"data": img_bytes.getvalue(), "created": time.time()}
 
         yield f"data: {json.dumps({'status': 'done', 'result_id': result_id})}\n\n"
 
@@ -143,9 +190,9 @@ async def upscale_stream(
 async def get_result(result_id: str):
     """Fetch the result image after streaming completes."""
     if result_id not in results_cache:
-        return Response(status_code=404, content="Result not found")
+        raise HTTPException(status_code=404, detail="Result not found or expired")
 
-    img_data = results_cache.pop(result_id)
+    img_data = results_cache.pop(result_id)["data"]
     return Response(content=img_data, media_type="image/png")
 
 
