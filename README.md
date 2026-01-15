@@ -16,7 +16,7 @@ Offload image upscaling to a remote server with a dedicated GPU. Useful when you
 
 1. Copy the `remote_upscale` folder to your ComfyUI `custom_nodes` directory
 2. Restart ComfyUI
-3. The "Remote Upscale (Radeon VII)" node will appear in the "image/upscaling" category
+3. The "Remote Upscale" node will appear in the "image/upscaling" category
 
 ### Upscale Server
 
@@ -37,7 +37,7 @@ The server will start on port 8189 by default.
 ## Usage
 
 1. Start the upscale server on your remote machine
-2. In ComfyUI, add the "Remote Upscale (Radeon VII)" node
+2. In ComfyUI, add the "Remote Upscale" node
 3. Set the `server_url` to your server address (e.g., `http://192.168.1.100:8189`)
 4. Select a model from the dropdown
 5. Connect an image input and run the workflow
